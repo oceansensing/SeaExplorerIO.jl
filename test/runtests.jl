@@ -167,6 +167,88 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
         end
     end
 
+    @testset "GLIMPSE .all.csv: YO_NUMBER column, sentinels, timestamp in col 2" begin
+        mktempdir() do d
+            write(joinpath(d, "SEA064.59.gli.sub.all.csv"),
+                "YO_NUMBER;Timestamp;NavState;Pitch;DesiredH;Lat\n" *
+                "1;01/01/1970 00:00:00;97;0.00;-9999;0.000\n" *      # bench row
+                "1;12/11/2023 18:00:00;105;25.30;-9999;7040.000\n" *
+                "2;12/11/2023 18:10:00;100;-20.50;73;7040.100\n")
+            @test glimpse_files(d, "gli.sub") |> length == 1
+            @test isempty(glimpse_files(d, "pld1.sub"))
+            t = read_gli(d)
+            @test length(t) == 2                          # 1970 row dropped
+            @test t["YO_NUMBER"] == [1.0, 2.0]            # kept as a data column
+            @test t["Pitch"] == [25.30, -20.50]
+            @test t["Lat"][1] ≈ 70 + 40.0 / 60            # NMEA → degrees
+            @test isnan(t["DesiredH"][1]) && t["DesiredH"][2] == 73   # ±9999 → NaN
+            # sentinel cleaning can be disabled
+            traw = read_gli(d; sentinels = nothing)
+            @test traw["DesiredH"][1] == -9999
+        end
+    end
+
+    @testset "multi-source merge: delayed segments + GLIMPSE export" begin
+        mktempdir() do del
+        mktempdir() do gl
+            _write_gz(joinpath(del, "sea064.59.gli.sub.1.gz"),
+                "Timestamp;Pitch;Roll;\n" *
+                "12/11/2023 18:00:00;10.0;1.0;\n" *
+                "12/11/2023 18:00:10;11.0;1.1;\n" *
+                "12/11/2023 18:00:20;12.0;1.2;\n")
+            write(joinpath(gl, "SEA064.59.gli.sub.all.csv"),
+                "YO_NUMBER;Timestamp;Pitch;Derived\n" *
+                "1;12/11/2023 18:00:00;10.0;5.5\n" *       # duplicate of delayed row
+                "1;12/11/2023 18:00:30;13.0;6.5\n")        # GLIMPSE-only row
+            t = merge_tables(read_gli(del), read_gli(gl))
+            @test length(t) == 4                           # union of rows
+            @test t["Pitch"] == [10.0, 11.0, 12.0, 13.0]
+            @test t["Roll"][1] == 1.0 && isnan(t["Roll"][4])          # column union
+            @test t["Derived"][1] == 5.5                   # coalesced onto delayed row
+            @test isnan(t["Derived"][2])
+            @test t["YO_NUMBER"][4] == 1.0
+            # vector-of-directories form does the same in one call
+            t2 = read_gli([del, gl])
+            @test t2.time == t.time && t2["Pitch"] == t["Pitch"]
+            @test length(t2.sources) == 2
+        end
+        end
+    end
+
+    @testset "merge_tables: priority, coalesce, within-table duplicates" begin
+        mk(times, name, vals) = GliderTable(times,
+            SeaExplorerIO.OrderedDict(name => Float64.(vals)), ["mem"])
+        t0 = DateTime(2024, 7, 20, 12)
+        a = mk([t0, t0, t0 + Second(10)], "x", [1.0, 2.0, 3.0])       # duplicate stamp inside
+        b = mk([t0, t0 + Second(20)], "x", [99.0, 4.0])
+        m = merge_tables(a, b)
+        @test length(m) == 4                               # within-a duplicate preserved
+        @test m["x"] == [1.0, 2.0, 3.0, 4.0]               # a wins at t0; b adds t0+20 only
+        # finite values are never overwritten, NaN cells are filled
+        c = mk([t0], "x", [NaN])
+        m2 = merge_tables(c, b)
+        @test m2["x"][1] == 99.0
+        @test merge_tables(a) === a
+    end
+
+    @testset "stream priority: raw preferred, sub fills gaps" begin
+        mktempdir() do d
+            _write_gz(joinpath(d, "sea064.59.pld1.raw.1.gz"),
+                "PLD_REALTIMECLOCK;LEGATO_TEMPERATURE;\n" *
+                "20/07/2024 12:00:00.100;3.501;\n" *
+                "20/07/2024 12:00:01.100;3.502;\n")
+            _write_gz(joinpath(d, "sea064.59.pld1.sub.1.gz"),
+                "PLD_REALTIMECLOCK;LEGATO_TEMPERATURE;\n" *
+                "20/07/2024 12:00:01.100;9.999;\n" *       # duplicate stamp: raw must win
+                "20/07/2024 12:00:05.100;3.506;\n")        # sub-only row survives
+            t = read_pld(d, ["LEGATO_TEMPERATURE"])        # default ["pld1.raw","pld1.sub"]
+            @test length(t) == 3
+            @test t["LEGATO_TEMPERATURE"] == [3.501, 3.502, 3.506]
+            traw = read_pld(d, ["LEGATO_TEMPERATURE"]; stream = "pld1.raw")
+            @test length(traw) == 2
+        end
+    end
+
     @testset "robustness: missing paths and corrupt files" begin
         # missing directory → actionable error, not a raw open() failure
         @test_throws ErrorException read_gli(joinpath(mktempdir(), "nope"))
@@ -226,6 +308,34 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
         end
     else
         @info "M38 reference data not found — skipping acceptance tests"
+    end
+
+    NESMA = "/Users/gong/oceansensing Dropbox/C2PO/glider/gliderData/sea064-20240720-nesma-passengers-complete"
+    if isdir(joinpath(NESMA, "glimpse")) && isdir(joinpath(NESMA, "delayed/nav/logs"))
+        @testset "NESMA acceptance: delayed + GLIMPSE dedup" begin
+            navlogs, glimpse = joinpath(NESMA, "delayed/nav/logs"), joinpath(NESMA, "glimpse")
+            navd = read_gli(navlogs)
+            navg = read_gli(glimpse)
+            nav = read_gli([navlogs, glimpse])
+            @test length(navg) < length(navd)              # GLIMPSE = telemetered subset
+            @test length(nav) == length(navd)              # here glimpse ⊂ delayed: no new rows
+            @test haskey(nav, "YO_NUMBER")                 # GLIMPSE column attached
+            @test count(isfinite, nav["YO_NUMBER"]) ≥ length(navg) - 10
+            @test issorted(nav.time)
+            # payload: raw resolution + GLIMPSE-only derived column in one call
+            cols = ["LEGATO_TEMPERATURE", "LEGATO_SOUND_VELOCITY"]
+            pld = read_pld([joinpath(NESMA, "delayed/pld1/logs"), glimpse], cols)
+            pldg = read_pld(glimpse, cols; stream = "pld1.sub")
+            @test length(pld) > 2 * length(pldg)           # raw ≫ telemetered sub
+            @test count(isfinite, pld["LEGATO_SOUND_VELOCITY"]) ≥
+                  count(isfinite, pldg["LEGATO_SOUND_VELOCITY"]) - 10
+            temps = filter(isfinite, pld["LEGATO_TEMPERATURE"])
+            @test !isempty(temps) && all(-2 .< temps .< 35)
+            @info "NESMA merged nav: $(length(nav)) rows ($(length(navg)) telemetered); " *
+                  "merged pld: $(length(pld)) rows ($(length(pldg)) telemetered)"
+        end
+    else
+        @info "NESMA reference data not found — skipping GLIMPSE acceptance tests"
     end
 
 end

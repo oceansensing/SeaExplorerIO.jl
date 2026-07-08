@@ -34,8 +34,32 @@ leg = read_stream("mission/pld1/logs", "legato.raw")
 
 # file bookkeeping
 seaexplorer_files("mission/nav/logs", "gli.sub")   # naturally sorted segment files
+glimpse_files("mission/glimpse", "gli.sub")        # GLIMPSE-server .all.csv exports
 missing_segments("mission/nav/logs", "gli.sub")    # gaps in the transfer sequence
 ```
+
+### Multiple download routes (glider computer + GLIMPSE)
+
+Mission data often exists twice: full-resolution files downloaded from the
+glider computer, and the telemetered subset served by Alseamar's **GLIMPSE**
+command-and-control server as concatenated `<stream>.all.csv` exports (leading
+`YO_NUMBER` column, ±9999 fill sentinels, extra server-computed columns).
+Pass all the places the data lives and everything is loaded once:
+
+```julia
+nav = read_gli(["mission/delayed/nav/logs", "mission/glimpse"])
+pld = read_pld(["mission/delayed/pld1/logs", "mission/glimpse"],
+               ["LEGATO_TEMPERATURE", "LEGATO_SOUND_VELOCITY"])
+```
+
+Rows and columns are unioned and duplicate timestamps deduplicated with the
+highest resolution preserved: `read_pld`'s default `stream =
+["pld1.raw", "pld1.sub"]` ranks full-resolution raw rows above telemetered sub
+rows, directories earlier in the list win ties, and at a duplicate timestamp
+the kept row is completed column-wise (GLIMPSE-only derived columns attach to
+raw rows; a finite value is never overwritten). The same machinery is exposed
+directly as `merge_tables(t1, t2, …)`. Sentinel cells (±9999, instrument-off
+fills) parse to NaN everywhere; disable with `sentinels = nothing`.
 
 All readers return a `GliderTable` (row timestamps + name → `Vector{Float64}`
 columns; `NaN` marks empty/non-numeric cells). Rows stamped before the glider's

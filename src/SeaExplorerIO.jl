@@ -3,7 +3,11 @@
 
 Readers for Alseamar SeaExplorer glider log files: navigation (`*.gli.sub.N[.gz]`)
 and payload (`*.pld1.raw.N[.gz]`, `*.pld1.sub.N[.gz]`, `*.legato.raw.N[.gz]`, …)
-streams, as logged by the glider and its payload computer.
+streams, as logged by the glider and its payload computer — plus the concatenated
+`*.<stream>.all.csv` exports served by Alseamar's GLIMPSE command-and-control
+server (leading `YO_NUMBER` column, ±9999 fill sentinels, extra derived columns).
+Data downloaded several ways can be read together and deduplicated with
+[`merge_tables`](@ref) or by passing a vector of directories to the readers.
 
 This package is the file layer only — discovery, gap detection, parsing,
 timestamp/coordinate normalization, and robustness to corrupt or missing files.
@@ -29,8 +33,8 @@ using Dates
 using CodecZlib: GzipDecompressorStream
 using OrderedCollections: OrderedDict
 
-export GliderTable, read_stream, read_gli, read_pld,
-       seaexplorer_files, missing_segments, nmea_to_deg
+export GliderTable, read_stream, read_gli, read_pld, merge_tables,
+       seaexplorer_files, glimpse_files, missing_segments, nmea_to_deg
 
 # ─────────────────────────────────────────────────────────────────────────────
 # GliderTable — the neutral column table both downstream packages adapt
@@ -94,10 +98,17 @@ const _FMT_MS  = dateformat"dd/mm/yyyy HH:MM:SS.sss"
 _parse_time(s::AbstractString) =
     tryparse(DateTime, s, length(s) > 19 ? _FMT_MS : _FMT_SEC)
 
-_parse_cell(s::AbstractString) = begin
+# Default fill sentinels: SeaExplorer payload logs and GLIMPSE exports write
+# ±9999 where an instrument reported nothing (e.g. every AD2CP_* cell while the
+# ADCP is off). Disable with `sentinels = nothing`.
+const DEFAULT_SENTINELS = (9999.0, -9999.0)
+
+_parse_cell(s::AbstractString, sentinels) = begin
     isempty(s) && return NaN
     v = tryparse(Float64, s)
-    v === nothing ? NaN : v          # "nan", garbage → NaN
+    v === nothing && return NaN      # "nan", garbage → NaN
+    sentinels !== nothing && v in sentinels && return NaN
+    return v
 end
 
 _open_log(path::AbstractString) = endswith(path, ".gz") ?
@@ -124,6 +135,20 @@ function seaexplorer_files(dir::AbstractString, stream::AbstractString)
         m === nothing || push!(hits, (parse(Int, m.captures[1]), joinpath(dir, f)))
     end
     return last.(sort(hits))
+end
+
+"""
+    glimpse_files(dir, stream) -> Vector{String}
+
+List GLIMPSE server exports of one stream in `dir`: the concatenated
+`<glider>.<mission>.<stream>.all.csv` files that Alseamar's GLIMPSE
+command-and-control server produces (one per stream, holding every telemetered
+row of the mission). These carry a leading `YO_NUMBER` column and use ±9999
+fill sentinels; [`read_stream`](@ref) handles both automatically.
+"""
+function glimpse_files(dir::AbstractString, stream::AbstractString)
+    pat = Regex("\\." * replace(stream, "." => "\\.") * "\\.all\\.csv\$", "i")
+    return sort([joinpath(dir, f) for f in readdir(dir) if occursin(pat, f)])
 end
 
 """
@@ -157,43 +182,52 @@ function _read_log_file!(times::Vector{DateTime},
                          path::AbstractString;
                          want::Union{Nothing, Vector{String}},
                          skip_empty::Bool,
-                         epoch_min::Union{Nothing, DateTime})
+                         epoch_min::Union{Nothing, DateTime},
+                         sentinels)
     io = _open_log(path)
     try
         header = readline(io)
         names = String.(split(strip(header, [';', ' ', '\r']), ';'))
-        # Column 1 is the timestamp. Map each selected column NAME to its
-        # cell index in THIS file (first occurrence wins on duplicates).
-        # Columns are kept row-aligned globally: a column new to this file
-        # is back-filled with NaN for all prior rows, and columns absent
-        # from this file's header get NaN for its rows — mixed headers
+        # The timestamp is column 1 in glider/payload logs; GLIMPSE `.all.csv`
+        # exports prepend a YO_NUMBER column, pushing it to column 2 (YO_NUMBER
+        # itself is kept as an ordinary data column). Map each selected column
+        # NAME to its cell index in THIS file (first occurrence wins on
+        # duplicates). Columns are kept row-aligned globally: a column new to
+        # this file is back-filled with NaN for all prior rows, and columns
+        # absent from this file's header get NaN for its rows — mixed headers
         # across files must never shift values onto wrong timestamps.
+        glimpse = length(names) >= 2 && names[1] == "YO_NUMBER"
+        tsi = glimpse ? 2 : 1
         src = OrderedDict{String, Int}()
         for (i, n) in enumerate(names)
-            i == 1 && continue
+            i == tsi && continue
             (want === nothing || n in want) || continue
             haskey(src, n) && continue                # duplicate header name
             src[n] = i
             haskey(cols, n) || (cols[n] = fill(NaN, length(times)))
         end
         sel = collect(values(src))
+        # "this cell carries data": non-empty, and for GLIMPSE exports (which
+        # write ±9999 fills instead of empty cells) also non-sentinel
+        carries(parts, i) = i <= length(parts) && !isempty(parts[i]) &&
+            (!glimpse || !isnan(_parse_cell(parts[i], sentinels)))
 
         for line in eachline(io)
             isempty(line) && continue
             parts = split(rstrip(line, '\r'), ';')
-            length(parts) < 2 && continue
-            t = _parse_time(parts[1])
+            length(parts) <= tsi && continue
+            t = _parse_time(parts[tsi])
             t === nothing && continue                 # unparseable row
             epoch_min !== nothing && t < epoch_min && continue   # clock-not-set bench rows
 
             if skip_empty
-                any(i -> i <= length(parts) && !isempty(parts[i]), sel) || continue
+                any(i -> carries(parts, i), sel) || continue
             end
             push!(times, t)
             for (name, vec) in cols
                 i = get(src, name, 0)
                 push!(vec, (i > 0 && i <= length(parts)) ?
-                           _parse_cell(parts[i]) : NaN)
+                           _parse_cell(parts[i], sentinels) : NaN)
             end
         end
     finally
@@ -201,33 +235,21 @@ function _read_log_file!(times::Vector{DateTime},
     end
 end
 
-function _read_logs(src, stream::AbstractString;
-                    columns::Union{Nothing, Vector{String}},
-                    skip_empty::Bool,
-                    epoch_min::Union{Nothing, DateTime},
-                    convert_coords::Bool)
-    src isa AbstractString && !ispath(src) &&
-        error("log path not found: $src")
-    local files
-    if src isa AbstractString && isdir(src)
-        files = seaexplorer_files(src, stream)
-        isempty(files) &&
-            error("no files matching stream `$stream` in $src")
-        miss = missing_segments(src, stream)
-        isempty(miss) ||
-            @warn "SeaExplorer $stream: missing segment numbers" missing = miss
-    else
-        files = src isa AbstractString ? [String(src)] : String.(src)
-        isempty(files) && error("no files matching stream `$stream`: empty file list")
-    end
-
+# Read one ordered file list (one source) into a GliderTable.
+function _read_source(files::Vector{String}, stream::AbstractString;
+                      columns::Union{Nothing, Vector{String}},
+                      skip_empty::Bool,
+                      epoch_min::Union{Nothing, DateTime},
+                      convert_coords::Bool,
+                      sentinels,
+                      ensure_columns::Bool = true)
     times = DateTime[]
     cols  = OrderedDict{String, Vector{Float64}}()
     nbad = 0
     for f in files
         try
             _read_log_file!(times, cols, f;
-                            want = columns, skip_empty, epoch_min)
+                            want = columns, skip_empty, epoch_min, sentinels)
         catch err
             # a corrupt/truncated file (e.g. bad gzip) must not take the
             # rest of the mission down with it
@@ -247,8 +269,9 @@ function _read_logs(src, stream::AbstractString;
 
     # Guarantee every requested column exists (all-NaN when the logs never
     # carried it) so downstream indexing degrades instead of KeyError-ing,
-    # and say so once rather than once per file.
-    if columns !== nothing
+    # and say so once rather than once per file. (Deferred to after the merge
+    # for multi-source reads — another source may carry the column.)
+    if ensure_columns && columns !== nothing
         for w in columns
             if !haskey(cols, w)
                 cols[w] = fill(NaN, length(times))
@@ -275,73 +298,227 @@ function _read_logs(src, stream::AbstractString;
     return GliderTable(times, cols, files)
 end
 
+"""
+    merge_tables(tables::GliderTable...) -> GliderTable
+
+Merge log tables from different download routes (glider computer, GLIMPSE
+server) or different resolutions (`pld1.raw`, `pld1.sub`) into one: the union
+of all rows and all columns, deduplicated by exact timestamp.
+
+Earlier tables take precedence — list the highest-resolution / most trusted
+source first. At a duplicate timestamp the kept row is completed column-wise:
+cells that are NaN in the higher-priority row are filled from the
+lower-priority one (so e.g. GLIMPSE-computed extra columns attach to
+full-resolution rows), and a finite value is never overwritten. Rows whose
+timestamp appears in no earlier table are appended whole. Duplicate timestamps
+*within* one table are preserved as-is.
+"""
+function merge_tables(tables::GliderTable...)
+    isempty(tables) && error("merge_tables: no tables given")
+    length(tables) == 1 && return tables[1]
+    allcols = String[]
+    for t in tables, k in keys(t)
+        k in allcols || push!(allcols, k)
+    end
+    times = DateTime[]
+    cols = OrderedDict{String, Vector{Float64}}(k => Float64[] for k in allcols)
+    index = Dict{DateTime, Int}()      # first occurrence, earlier tables only
+    ndup = 0
+    for t in tables
+        added = Dict{DateTime, Int}()
+        for i in eachindex(t.time)
+            ts = t.time[i]
+            j = get(index, ts, 0)
+            if j > 0                   # duplicate of an earlier source: coalesce
+                ndup += 1
+                for k in keys(t)
+                    v = t[k][i]
+                    isnan(cols[k][j]) && !isnan(v) && (cols[k][j] = v)
+                end
+            else
+                push!(times, ts)
+                for k in allcols
+                    push!(cols[k], haskey(t, k) ? t[k][i] : NaN)
+                end
+                haskey(added, ts) || (added[ts] = length(times))
+            end
+        end
+        merge!(index, added)
+    end
+    if !issorted(times)
+        p = sortperm(times)
+        times = times[p]
+        for (k, v) in cols
+            cols[k] = v[p]
+        end
+    end
+    sources = reduce(vcat, (t.sources for t in tables))
+    ndup > 0 &&
+        @info "merge_tables: $(length(times)) rows from $(length(tables)) sources ($ndup duplicate timestamps coalesced)"
+    return GliderTable(times, cols, sources)
+end
+
+# One (directory, stream) source: segment files + GLIMPSE .all.csv exports.
+function _source_files(dir::AbstractString, stream::AbstractString)
+    files = vcat(seaexplorer_files(dir, stream), glimpse_files(dir, stream))
+    if !isempty(files)
+        miss = missing_segments(dir, stream)
+        isempty(miss) ||
+            @warn "SeaExplorer $stream: missing segment numbers" dir = dir missing = miss
+    end
+    return files
+end
+
+function _read_logs(src, stream;
+                    columns::Union{Nothing, Vector{String}},
+                    skip_empty::Bool,
+                    epoch_min::Union{Nothing, DateTime},
+                    convert_coords::Bool,
+                    sentinels)
+    streams = stream isa AbstractString ? [String(stream)] : String.(stream)
+    kw = (; columns, skip_empty, epoch_min, convert_coords, sentinels)
+
+    src isa AbstractString && !ispath(src) &&
+        error("log path not found: $src")
+
+    # explicit single file or file list → one source, first stream label
+    if src isa AbstractString && !isdir(src)
+        return _read_source([String(src)], streams[1]; kw...)
+    end
+    if !(src isa AbstractString)
+        isempty(src) && error("no files matching stream `$(streams[1])`: empty source list")
+        ndirs = count(p -> isdir(String(p)), src)
+        if ndirs == 0                          # explicit file list
+            return _read_source(String.(src), streams[1]; kw...)
+        elseif ndirs < length(src)
+            bad = [String(p) for p in src if !isdir(String(p))]
+            error("log sources mix directories with files or missing paths: $(join(bad, ", "))")
+        end
+    end
+
+    # directory source(s) × stream priority list → read each, merge by priority:
+    # streams are ranked (raw before sub), directories break ties in given order
+    dirs = src isa AbstractString ? [String(src)] : String.(src)
+    tables = GliderTable[]
+    for st in streams, d in dirs
+        files = _source_files(d, st)
+        isempty(files) && continue
+        push!(tables, _read_source(files, st; kw..., ensure_columns = false))
+    end
+    isempty(tables) &&
+        error("no files matching stream `$(join(streams, "`/`"))` in $(join(dirs, ", "))")
+    out = merge_tables(tables...)
+
+    if columns !== nothing
+        for w in columns
+            if !haskey(out, w)
+                out.cols[w] = fill(NaN, length(out))
+                @warn "column absent from all sources" column = w
+            end
+        end
+    end
+    return out
+end
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Public readers
 # ─────────────────────────────────────────────────────────────────────────────
 
+const _StreamSpec = Union{AbstractString, AbstractVector{<:AbstractString}}
+
 """
     read_stream(src, stream; columns = nothing, skip_empty = false,
-                epoch_min = DateTime(2000), convert_coords = true) -> GliderTable
+                epoch_min = DateTime(2000), convert_coords = true,
+                sentinels = $(DEFAULT_SENTINELS)) -> GliderTable
 
-Read any segment-numbered SeaExplorer stream (`"gli.sub"`, `"pld1.raw"`,
-`"pld1.sub"`, `"legato.raw"`, …). `src` is a directory (all matching segment
-files, naturally sorted — with a warning listing any [`missing_segments`](@ref)),
-a single file, or an explicit vector of paths.
+Read a SeaExplorer stream (`"gli.sub"`, `"pld1.raw"`, `"pld1.sub"`,
+`"legato.raw"`, …) — both segment-numbered log files and GLIMPSE-server
+`.all.csv` exports of that stream are recognized. `src` is a directory
+(with a warning listing any [`missing_segments`](@ref)), a single file, an
+explicit vector of file paths, **or a vector of directories** — data
+downloaded several ways (glider computer + GLIMPSE server) is then combined
+with [`merge_tables`](@ref): all rows and columns are loaded, and duplicate
+timestamps are deduplicated with earlier directories taking precedence.
+`stream` may likewise be a priority-ranked vector (e.g.
+`["pld1.raw", "pld1.sub"]`): every listed stream present in any source is
+read, and at duplicate timestamps earlier (higher-resolution) streams win.
 
 - `columns` selects a subset by header name (nothing = all) — memory stays
   proportional to the selection, which matters for `pld1.raw`
   (10⁶–10⁷ rows × ~60 columns per mission).
 - `skip_empty` drops rows where every selected cell is empty (payload
-  instruments report asynchronously).
+  instruments report asynchronously; in GLIMPSE exports, sentinel-filled
+  counts as empty).
 - Rows stamped before `epoch_min` are dropped (the glider logs bench rows
   stamped 1970-01-01 before its clock is set); pass `epoch_min = nothing`
   to keep everything.
 - Known coordinate columns ($(join(NMEA_COORD_COLS, ", "))) are converted from
   NMEA DDMM.mmm to signed decimal degrees unless `convert_coords = false`.
+- Cells equal to a `sentinels` value parse to NaN (SeaExplorer logs and
+  GLIMPSE exports use ±9999 as instrument-off fills); `sentinels = nothing`
+  disables this.
 
 Corrupt or unreadable files are skipped with a warning; it is an error only
 when no file of the stream can be read.
 """
-read_stream(src, stream::AbstractString;
+read_stream(src, stream::_StreamSpec;
             columns::Union{Nothing, Vector{String}} = nothing,
             skip_empty::Bool = false,
             epoch_min::Union{Nothing, DateTime} = DateTime(2000),
-            convert_coords::Bool = true) =
-    _read_logs(src, stream; columns, skip_empty, epoch_min, convert_coords)
+            convert_coords::Bool = true,
+            sentinels = DEFAULT_SENTINELS) =
+    _read_logs(src, stream; columns, skip_empty, epoch_min, convert_coords, sentinels)
 
 """
     read_gli(src; stream = "gli.sub", columns = nothing,
-             epoch_min = DateTime(2000), convert_coords = true) -> GliderTable
+             epoch_min = DateTime(2000), convert_coords = true,
+             sentinels = $(DEFAULT_SENTINELS)) -> GliderTable
 
-Read SeaExplorer navigation logs (`*.gli.sub.N[.gz]`). `src` is a directory
-(all matching files, numerically sorted), a single file, or a vector of
-paths. `columns` selects a subset by header name (default: all — the nav
-table is small). `Lat`/`Lon` are converted from NMEA DDMM.mmm to decimal
-degrees unless `convert_coords = false`. Rows stamped before `epoch_min`
-(glider clock not yet set) are dropped.
+Read SeaExplorer navigation logs: segment files (`*.gli.sub.N[.gz]`) and/or
+GLIMPSE-server exports (`*.gli.sub.all.csv`). `src` is a directory (all
+matching files, numerically sorted), a single file, a vector of paths, or a
+vector of directories — e.g.
+`read_gli(["mission/delayed/nav/logs", "mission/glimpse"])` loads both
+download routes and deduplicates by timestamp, earlier directories winning
+(see [`merge_tables`](@ref)). `columns` selects a subset by header name
+(default: all — the nav table is small). `Lat`/`Lon` are converted from NMEA
+DDMM.mmm to decimal degrees unless `convert_coords = false`. Rows stamped
+before `epoch_min` (glider clock not yet set) are dropped.
 """
-read_gli(src; stream::AbstractString = "gli.sub",
+read_gli(src; stream::_StreamSpec = "gli.sub",
          columns::Union{Nothing, Vector{String}} = nothing,
          epoch_min::Union{Nothing, DateTime} = DateTime(2000),
-         convert_coords::Bool = true) =
-    _read_logs(src, stream; columns, skip_empty = false, epoch_min, convert_coords)
+         convert_coords::Bool = true,
+         sentinels = DEFAULT_SENTINELS) =
+    _read_logs(src, stream; columns, skip_empty = false, epoch_min, convert_coords, sentinels)
 
 """
-    read_pld(src, columns = nothing; stream = "pld1.raw", skip_empty = true,
-             epoch_min = DateTime(2000), convert_coords = true) -> GliderTable
+    read_pld(src, columns = nothing; stream = ["pld1.raw", "pld1.sub"],
+             skip_empty = true, epoch_min = DateTime(2000),
+             convert_coords = true, sentinels = $(DEFAULT_SENTINELS)) -> GliderTable
 
-Read SeaExplorer payload logs (`*.pld1.raw.N[.gz]` by default; set `stream`
-for `"pld1.sub"`, `"legato.raw"`, …), keeping only `columns` (header names,
-e.g. `["LEGATO_TEMPERATURE", "LEGATO_SALINITY"]`; nothing = all columns —
-mind the memory on `pld1.raw`). Because payload instruments report
-asynchronously, rows where every selected column is empty are skipped unless
+Read SeaExplorer payload logs, keeping only `columns` (header names, e.g.
+`["LEGATO_TEMPERATURE", "LEGATO_SALINITY"]`; nothing = all columns — mind the
+memory on `pld1.raw`).
+
+`stream` is a priority-ranked list: by default the full-resolution `pld1.raw`
+segments are read first and the telemetered `pld1.sub` rows (segment files
+and/or GLIMPSE `.all.csv` exports) then fill in only what raw is missing —
+all data is loaded, duplicate timestamps keep the highest-resolution values,
+and GLIMPSE-only derived columns attach to the merged rows. `src` may be one
+directory, a vector of directories (glider-computer + GLIMPSE downloads), a
+single file, or an explicit file list.
+
+Because payload instruments report asynchronously, rows where every selected
+column is empty (or sentinel-filled, for GLIMPSE exports) are skipped unless
 `skip_empty = false`. `NAV_LATITUDE`/`NAV_LONGITUDE` are converted to decimal
 degrees unless `convert_coords = false`.
 """
 read_pld(src, columns::Union{Nothing, Vector{String}} = nothing;
-         stream::AbstractString = "pld1.raw", skip_empty::Bool = true,
+         stream::_StreamSpec = ["pld1.raw", "pld1.sub"], skip_empty::Bool = true,
          epoch_min::Union{Nothing, DateTime} = DateTime(2000),
-         convert_coords::Bool = true) =
-    _read_logs(src, stream; columns, skip_empty, epoch_min, convert_coords)
+         convert_coords::Bool = true,
+         sentinels = DEFAULT_SENTINELS) =
+    _read_logs(src, stream; columns, skip_empty, epoch_min, convert_coords, sentinels)
 
 end # module
