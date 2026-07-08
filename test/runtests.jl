@@ -325,15 +325,28 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
     end
 
     if isdir(M38_NAV) && isdir(joinpath(M38_DIR, "glimpse"))
-        @testset "M38 acceptance: zero-byte GLIMPSE exports degrade gracefully" begin
-            # this mission's GLIMPSE download produced empty .all.csv files —
-            # merging must reproduce the delayed-only result and say why
+        @testset "M38 acceptance: delayed + GLIMPSE dedup (2022-era export)" begin
+            glimpse = joinpath(M38_DIR, "glimpse")
             navd = read_gli(M38_NAV)
-            nav = @test_logs (:warn, r"no rows parsed") match_mode = :any begin
-                read_gli([M38_NAV, joinpath(M38_DIR, "glimpse")])
+            navg = read_gli(glimpse)
+            nav = read_gli([M38_NAV, glimpse])
+            @test length(navg) > 100_000                   # telemetered record
+            @test length(nav) == length(navd)              # glimpse ⊂ delayed: no new rows
+            @test haskey(nav, "YO_NUMBER")
+            @test issorted(nav.time)
+            # this GLIMPSE version carries AD2CP-derived columns (but not the
+            # LEGATO_SOUND_VELOCITY that 2024-era exports add — absent columns
+            # must degrade to NaN with a warning, not error)
+            cols = ["LEGATO_TEMPERATURE", "AD2CP_Utot_c", "LEGATO_SOUND_VELOCITY"]
+            pld = @test_logs (:warn, r"column absent") match_mode = :any begin
+                read_pld([joinpath(M38_DIR, "delayed/pld1/logs"), glimpse], cols)
             end
-            @test nav.time == navd.time
-            @test collect(keys(nav)) == collect(keys(navd))
+            @test count(isfinite, pld["AD2CP_Utot_c"]) > 10_000   # attached to raw rows
+            @test all(isnan, pld["LEGATO_SOUND_VELOCITY"])
+            temps = filter(isfinite, pld["LEGATO_TEMPERATURE"])
+            @test !isempty(temps) && all(-2 .< temps .< 20)
+            @info "M38 merged nav: $(length(nav)) rows ($(length(navg)) telemetered); " *
+                  "AD2CP_Utot_c: $(count(isfinite, pld["AD2CP_Utot_c"])) onboard current values"
         end
     end
 
