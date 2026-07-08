@@ -266,6 +266,10 @@ function _read_source(files::Vector{String}, stream::AbstractString;
     nbad == length(files) &&
         error("all $(length(files)) log files of stream `$stream` are unreadable")
     nbad > 0 && @warn "$nbad of $(length(files)) log files skipped as unreadable"
+    # files existed but yielded nothing (e.g. a zero-byte GLIMPSE export from a
+    # failed server download) — say so rather than silently contributing no data
+    isempty(times) &&
+        @warn "no rows parsed from $(length(files)) file(s) of stream `$stream`" first_file = basename(first(files))
 
     # Guarantee every requested column exists (all-NaN when the logs never
     # carried it) so downstream indexing degrades instead of KeyError-ing,

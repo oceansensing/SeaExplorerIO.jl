@@ -215,6 +215,20 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
         end
     end
 
+    @testset "empty GLIMPSE export contributes nothing, with a warning" begin
+        mktempdir() do del
+        mktempdir() do gl
+            _write_gz(joinpath(del, "sea064.38.gli.sub.1.gz"),
+                "Timestamp;Pitch;\n12/11/2023 18:00:00;10.0;\n")
+            touch(joinpath(gl, "SEA064.38.gli.sub.all.csv"))          # zero-byte download
+            t = @test_logs (:warn, r"no rows parsed") match_mode = :any begin
+                read_gli([del, gl])
+            end
+            @test length(t) == 1 && t["Pitch"] == [10.0]
+        end
+        end
+    end
+
     @testset "merge_tables: priority, coalesce, within-table duplicates" begin
         mk(times, name, vals) = GliderTable(times,
             SeaExplorerIO.OrderedDict(name => Float64.(vals)), ["mem"])
@@ -308,6 +322,19 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
         end
     else
         @info "M38 reference data not found — skipping acceptance tests"
+    end
+
+    if isdir(M38_NAV) && isdir(joinpath(M38_DIR, "glimpse"))
+        @testset "M38 acceptance: zero-byte GLIMPSE exports degrade gracefully" begin
+            # this mission's GLIMPSE download produced empty .all.csv files —
+            # merging must reproduce the delayed-only result and say why
+            navd = read_gli(M38_NAV)
+            nav = @test_logs (:warn, r"no rows parsed") match_mode = :any begin
+                read_gli([M38_NAV, joinpath(M38_DIR, "glimpse")])
+            end
+            @test nav.time == navd.time
+            @test collect(keys(nav)) == collect(keys(navd))
+        end
     end
 
     NESMA = "/Users/gong/oceansensing Dropbox/C2PO/glider/gliderData/sea064-20240720-nesma-passengers-complete"
