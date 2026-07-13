@@ -1,7 +1,7 @@
 name = "SeaExplorerIO"
 uuid = "557abfff-f1d9-403d-9780-08129415b24b"
 authors = ["Donglai Gong <15986815+truedichotomy@users.noreply.github.com>"]
-version = "0.3.0"
+version = "0.3.1"
 
 [deps]
 CodecZlib = "944b1d66-785c-5afd-91f1-9de20f533193"
