@@ -10,7 +10,7 @@ corrupt or missing files. Sensor physics lives downstream:
 
 - [GliderADCP.jl](https://github.com/truedichotomy/GliderADCP.jl) — Nortek
   AD2CP processing to absolute ocean velocities
-- [ATOMIXjulia.jl](https://github.com/truedichotomy/ATOMIXjulia.jl) — MicroRider
+- ATOMIXjulia.jl (not yet public) — MicroRider
   microstructure/turbulence processing
 
 Both wrap this package, so a loader bugfix or a new sensor lands once, here.
@@ -76,9 +76,16 @@ Real missions are messy; the readers degrade gracefully and loudly:
   a `KeyError`; mixed headers across segment files stay row-aligned
 - unparseable rows and cells become skipped rows / NaN, never exceptions
 
+## Data availability
+
+The gated acceptance tests reference SeaExplorer mission data held locally by the
+author and not distributed with this repository; they skip automatically when the
+data is absent, and the synthetic-data tests cover every code path — `Pkg.test()`
+passes on a fresh clone.
+
 ## Provenance
 
 Merged from the independently developed loaders of ATOMIXjulia.jl (lean
 column-selective parser, schema guarantees) and GliderADCP.jl (generic stream
 discovery, transfer-gap detection), keeping the best of both. Validated
-against the sea064 M38 NorSE mission (Lofoten Basin, 2022–2023).
+against the sea064 M38 NORSE mission (Lofoten Basin, 2022–2023).

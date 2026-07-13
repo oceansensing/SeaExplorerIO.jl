@@ -1,0 +1,29 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "SeaExplorerIO.jl: pure-Julia readers for Alseamar SeaExplorer glider log files"
+type: software
+authors:
+  - family-names: Gong
+    given-names: Donglai
+    orcid: "https://orcid.org/0000-0002-1697-1739"
+version: 0.2.1
+date-released: "2026-07-13"
+license: MIT
+repository-code: "https://github.com/oceansensing/SeaExplorerIO.jl"
+keywords:
+  - oceanography
+  - underwater glider
+  - SeaExplorer
+  - glider data
+  - data readers
+  - Julia
+abstract: >-
+  SeaExplorerIO.jl reads Alseamar SeaExplorer glider log files — navigation
+  (gli) and payload (pld1, legato, ...) streams, both segment-numbered logs
+  from the glider computer and concatenated GLIMPSE-server CSV exports — into
+  a uniform column table. It is deliberately the file layer only: stream
+  discovery, transfer-gap detection, robust parsing (corrupt files skipped
+  loudly, sentinel fills handled), timestamp and NMEA-coordinate
+  normalization, and multi-download-route merging with exact-timestamp
+  deduplication. It serves as the shared loading layer for GliderADCP.jl and
+  ATOMIXjulia.jl.
