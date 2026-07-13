@@ -10,7 +10,7 @@ corrupt or missing files. Sensor physics lives downstream:
 
 - [GliderADCP.jl](https://github.com/oceansensing/GliderADCP.jl) — glider
   ADCP processing to absolute ocean velocities
-- ATOMIXjulia.jl (not yet public) — MicroRider
+- GliderTurbulence.jl (not yet public) — MicroRider
   microstructure/turbulence processing
 
 Both wrap this package, so a loader bugfix or a new sensor lands once, here.
@@ -89,7 +89,7 @@ passes on a fresh clone.
 
 ## Provenance
 
-Merged from the independently developed loaders of ATOMIXjulia.jl (lean
+Merged from the independently developed loaders of GliderTurbulence.jl (lean
 column-selective parser, schema guarantees) and GliderADCP.jl (generic stream
 discovery, transfer-gap detection), keeping the best of both. Validated
 against the sea064 M38 NORSE mission (Lofoten Basin, 2022–2023).

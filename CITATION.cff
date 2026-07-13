@@ -26,4 +26,4 @@ abstract: >-
   loudly, sentinel fills handled), timestamp and NMEA-coordinate
   normalization, and multi-download-route merging with exact-timestamp
   deduplication. It serves as the shared loading layer for GliderADCP.jl and
-  ATOMIXjulia.jl.
+  GliderTurbulence.jl.

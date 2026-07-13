@@ -11,7 +11,7 @@ Data downloaded several ways can be read together and deduplicated with
 
 This package is the file layer only — discovery, gap detection, parsing,
 timestamp/coordinate normalization, and robustness to corrupt or missing files.
-Sensor physics lives downstream (GliderADCP.jl for ADCP work, ATOMIXjulia.jl for
+Sensor physics lives downstream (GliderADCP.jl for ADCP work, GliderTurbulence.jl for
 microstructure), where thin wrappers adapt the [`GliderTable`](@ref) returned here.
 
 File conventions (verified on SeaExplorer missions sea064 M37/M38/M48/M59):
