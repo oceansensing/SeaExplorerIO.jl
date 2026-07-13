@@ -34,7 +34,7 @@ leg = read_stream("mission/pld1/logs", "legato.raw")
 
 # file bookkeeping
 seaexplorer_files("mission/nav/logs", "gli.sub")   # naturally sorted segment files
-glimpse_files("mission/glimpse", "gli.sub")        # GLIMPSE-server .all.csv exports
+glimpse_files("mission/glimpse", "gli.sub")        # GLIMPSE .all.csv + per-cycle exports
 missing_segments("mission/nav/logs", "gli.sub")    # gaps in the transfer sequence
 ```
 
@@ -52,14 +52,18 @@ pld = read_pld(["mission/delayed/pld1/logs", "mission/glimpse"],
                ["LEGATO_TEMPERATURE", "LEGATO_SOUND_VELOCITY"])
 ```
 
-Rows and columns are unioned and duplicate timestamps deduplicated with the
-highest resolution preserved: `read_pld`'s default `stream =
+Any mixture works — segment logs with gaps, a whole-mission `.all.csv`,
+assorted per-cycle `.NNN.csv` exports, across any number of directories, any of
+them decimated — because every export is its own merge source: the result holds
+**every distinct timestamp from any source** (the densest available data wins by
+construction), deduplicated by priority. `read_pld`'s default `stream =
 ["pld1.raw", "pld1.sub"]` ranks full-resolution raw rows above telemetered sub
-rows, directories earlier in the list win ties, and at a duplicate timestamp
-the kept row is completed column-wise (GLIMPSE-only derived columns attach to
-raw rows; a finite value is never overwritten). The same machinery is exposed
-directly as `merge_tables(t1, t2, …)`. Sentinel cells (±9999, instrument-off
-fills) parse to NaN everywhere; disable with `sentinels = nothing`.
+rows; directories earlier in the list win ties; within a directory, segment
+logs > `.all.csv` > per-cycle exports. At a duplicate timestamp the kept row is
+completed column-wise (GLIMPSE-only derived columns attach to raw rows; a
+finite value is never overwritten). The same machinery is exposed directly as
+`merge_tables(t1, t2, …)`. Sentinel cells (±9999, instrument-off fills) parse
+to NaN everywhere; disable with `sentinels = nothing`.
 
 All readers return a `GliderTable` (row timestamps + name → `Vector{Float64}`
 columns; `NaN` marks empty/non-numeric cells). Rows stamped before the glider's

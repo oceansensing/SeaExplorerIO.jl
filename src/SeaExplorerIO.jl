@@ -140,15 +140,30 @@ end
 """
     glimpse_files(dir, stream) -> Vector{String}
 
-List GLIMPSE server exports of one stream in `dir`: the concatenated
-`<glider>.<mission>.<stream>.all.csv` files that Alseamar's GLIMPSE
-command-and-control server produces (one per stream, holding every telemetered
-row of the mission). These carry a leading `YO_NUMBER` column and use ±9999
-fill sentinels; [`read_stream`](@ref) handles both automatically.
+List GLIMPSE server exports of one stream in `dir`, in merge-priority order:
+the concatenated whole-mission `<glider>.<mission>.<stream>.all.csv` first,
+then per-cycle `<glider>.<mission>.<stream>.<NNN>.csv` exports numerically.
+Both flavors carry a leading `YO_NUMBER` column and use ±9999 fill sentinels;
+[`read_stream`](@ref) handles them automatically and treats each export as its
+own merge source, so overlapping downloads (a cycle also covered by the
+`.all.csv`, re-downloaded cycles, decimated exports) deduplicate instead of
+doubling rows.
 """
 function glimpse_files(dir::AbstractString, stream::AbstractString)
-    pat = Regex("\\." * replace(stream, "." => "\\.") * "\\.all\\.csv\$", "i")
-    return sort([joinpath(dir, f) for f in readdir(dir) if occursin(pat, f)])
+    esc = replace(stream, "." => "\\.")
+    pall = Regex("\\." * esc * "\\.all\\.csv\$", "i")
+    pcyc = Regex("\\." * esc * "\\.(\\d+)\\.csv\$", "i")
+    alls = String[]
+    cycs = Tuple{Int,String}[]
+    for f in readdir(dir)
+        if occursin(pall, f)
+            push!(alls, joinpath(dir, f))
+        else
+            m = match(pcyc, f)
+            m === nothing || push!(cycs, (parse(Int, m.captures[1]), joinpath(dir, f)))
+        end
+    end
+    return vcat(sort(alls), last.(sort(cycs)))
 end
 
 """
@@ -362,15 +377,24 @@ function merge_tables(tables::GliderTable...)
     return GliderTable(times, cols, sources)
 end
 
-# One (directory, stream) source: segment files + GLIMPSE .all.csv exports.
-function _source_files(dir::AbstractString, stream::AbstractString)
-    files = vcat(seaexplorer_files(dir, stream), glimpse_files(dir, stream))
-    if !isempty(files)
+# The merge sources for one (directory, stream): the sequential segment logs as
+# one source, then each GLIMPSE export (.all.csv, then per-cycle .NNN.csv) as its
+# OWN source — so any overlap between exports (a cycle also covered by .all.csv,
+# re-downloaded or decimated exports) deduplicates at merge time instead of
+# doubling rows. Within-source duplicate timestamps stay preserved as always.
+function _dir_sources(dir::AbstractString, stream::AbstractString)
+    srcs = Vector{String}[]
+    segs = seaexplorer_files(dir, stream)
+    if !isempty(segs)
+        push!(srcs, segs)
         miss = missing_segments(dir, stream)
         isempty(miss) ||
             @warn "SeaExplorer $stream: missing segment numbers" dir = dir missing = miss
     end
-    return files
+    for f in glimpse_files(dir, stream)
+        push!(srcs, [f])
+    end
+    return srcs
 end
 
 function _read_logs(src, stream;
@@ -400,17 +424,32 @@ function _read_logs(src, stream;
         end
     end
 
-    # directory source(s) × stream priority list → read each, merge by priority:
-    # streams are ranked (raw before sub), directories break ties in given order
+    # directory source(s) × stream priority list → read each source, merge by
+    # priority: streams are ranked (raw before sub), directories break ties in
+    # the given order, and within a directory segment logs outrank the GLIMPSE
+    # .all.csv, which outranks per-cycle exports. Row union means decimated or
+    # fragmentary sources cost nothing: every distinct timestamp from any source
+    # survives, so the densest available data wins by construction.
     dirs = src isa AbstractString ? [String(src)] : String.(src)
     tables = GliderTable[]
+    nbadsrc = 0
     for st in streams, d in dirs
-        files = _source_files(d, st)
-        isempty(files) && continue
-        push!(tables, _read_source(files, st; kw..., ensure_columns = false))
+        for files in _dir_sources(d, st)
+            t = try
+                _read_source(files, st; kw..., ensure_columns = false)
+            catch err
+                nbadsrc += 1
+                @warn "skipping unreadable source" stream = st nfiles = length(files) error = sprint(showerror, err)
+                continue
+            end
+            push!(tables, t)
+        end
     end
-    isempty(tables) &&
+    if isempty(tables)
+        nbadsrc > 0 &&
+            error("all sources of stream `$(join(streams, "`/`"))` in $(join(dirs, ", ")) are unreadable")
         error("no files matching stream `$(join(streams, "`/`"))` in $(join(dirs, ", "))")
+    end
     out = merge_tables(tables...)
 
     if columns !== nothing
@@ -436,16 +475,19 @@ const _StreamSpec = Union{AbstractString, AbstractVector{<:AbstractString}}
                 sentinels = $(DEFAULT_SENTINELS)) -> GliderTable
 
 Read a SeaExplorer stream (`"gli.sub"`, `"pld1.raw"`, `"pld1.sub"`,
-`"legato.raw"`, …) — both segment-numbered log files and GLIMPSE-server
-`.all.csv` exports of that stream are recognized. `src` is a directory
-(with a warning listing any [`missing_segments`](@ref)), a single file, an
-explicit vector of file paths, **or a vector of directories** — data
-downloaded several ways (glider computer + GLIMPSE server) is then combined
-with [`merge_tables`](@ref): all rows and columns are loaded, and duplicate
-timestamps are deduplicated with earlier directories taking precedence.
-`stream` may likewise be a priority-ranked vector (e.g.
-`["pld1.raw", "pld1.sub"]`): every listed stream present in any source is
-read, and at duplicate timestamps earlier (higher-resolution) streams win.
+`"legato.raw"`, …) — segment-numbered log files, GLIMPSE-server whole-mission
+`.all.csv` exports, and GLIMPSE per-cycle `.NNN.csv` exports are all
+recognized. `src` is a directory (with a warning listing any
+[`missing_segments`](@ref)), a single file, an explicit vector of file paths,
+**or a vector of directories** — any mixture of download routes and export
+flavors, possibly decimated or gap-ridden, is combined with
+[`merge_tables`](@ref) into one table holding **every distinct timestamp from
+any source** (so the densest available data wins by construction), duplicates
+deduplicated by priority: streams in the order given (e.g.
+`["pld1.raw", "pld1.sub"]` — raw wins), then directories in the order given,
+then within a directory segment logs > `.all.csv` > per-cycle exports. At a
+shared timestamp the kept row is completed column-wise from lower-priority
+sources (GLIMPSE-only derived columns attach to full-resolution rows).
 
 - `columns` selects a subset by header name (nothing = all) — memory stays
   proportional to the selection, which matters for `pld1.raw`

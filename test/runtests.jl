@@ -215,6 +215,57 @@ const M38_PLD = joinpath(M38_DIR, "delayed/pld1/logs")
         end
     end
 
+    @testset "GLIMPSE per-cycle files: mixture assembles to deduped union" begin
+        mktempdir() do d
+            # a realistic mid-mission mess, all in one directory:
+            #   segment log: t1, t2            (full resolution, but a gap after t2)
+            #   .all.csv:    t1, t3            (decimated — misses t2, t4, t5 — but
+            #                                   carries a server-derived column)
+            #   cycle 001:   t2, t3, t4        (overlaps segment AND .all.csv)
+            #   cycle 002:   t4, t5            (overlaps cycle 001)
+            _write_gz(joinpath(d, "sea064.38.gli.sub.1.gz"),
+                "Timestamp;Pitch;\n" *
+                "03/11/2022 12:00:00;10.0;\n" *
+                "03/11/2022 12:00:10;11.0;\n")
+            write(joinpath(d, "SEA064.38.gli.sub.all.csv"),
+                "YO_NUMBER;Timestamp;Pitch;Derived\n" *
+                "1;03/11/2022 12:00:00;99.0;5.5\n" *
+                "1;03/11/2022 12:00:20;12.0;6.5\n")
+            write(joinpath(d, "SEA064.38.gli.sub.001.csv"),
+                "YO_NUMBER;Timestamp;Pitch;Derived\n" *
+                "1;03/11/2022 12:00:10;99.0;7.5\n" *
+                "1;03/11/2022 12:00:20;99.0;9.9\n" *
+                "1;03/11/2022 12:00:30;13.0;8.5\n")
+            write(joinpath(d, "SEA064.38.gli.sub.002.csv"),
+                "YO_NUMBER;Timestamp;Pitch;Derived\n" *
+                "2;03/11/2022 12:00:30;99.0;9.9\n" *
+                "2;03/11/2022 12:00:40;14.0;9.5\n")
+            @test length(glimpse_files(d, "gli.sub")) == 3          # all.csv first
+            @test endswith(glimpse_files(d, "gli.sub")[1], ".all.csv")
+            t = read_gli(d)
+            @test length(t) == 5                                     # union, no doubles
+            @test t["Pitch"] == [10.0, 11.0, 12.0, 13.0, 14.0]       # priority: segments >
+            @test t["Derived"][1] == 5.5                             #   .all.csv > cycles;
+            @test t["Derived"][2] == 7.5                             # coalesce fills NaN
+            @test t["Derived"][4] == 8.5                             # cycle-001 beats 002
+        end
+    end
+
+    @testset "unreadable GLIMPSE source is skipped; all-unreadable errors" begin
+        mktempdir() do d
+            _write_gz(joinpath(d, "sea064.38.gli.sub.1.gz"),
+                "Timestamp;Pitch;\n03/11/2022 12:00:00;10.0;\n")
+            write(joinpath(d, "SEA064.38.gli.sub.001.csv"), UInt8[0x00, 0x01])  # binary junk
+            t = read_gli(d)                     # junk csv parses to zero rows, harmless
+            @test length(t) == 1
+        end
+        mktempdir() do d
+            write(joinpath(d, "sea064.38.gli.sub.1.gz"), UInt8[0x1f, 0x8b, 0x00])
+            err = try read_gli(d); catch e; e end
+            @test occursin("unreadable", sprint(showerror, err))
+        end
+    end
+
     @testset "empty GLIMPSE export contributes nothing, with a warning" begin
         mktempdir() do del
         mktempdir() do gl
