@@ -8,7 +8,7 @@ This package is deliberately the **file layer only** — discovery, transfer-gap
 detection, parsing, timestamp/coordinate normalization, and robustness to
 corrupt or missing files. Sensor physics lives downstream:
 
-- [GliderADCP.jl](https://github.com/truedichotomy/GliderADCP.jl) — glider
+- [GliderADCP.jl](https://github.com/oceansensing/GliderADCP.jl) — glider
   ADCP processing to absolute ocean velocities
 - ATOMIXjulia.jl (not yet public) — MicroRider
   microstructure/turbulence processing
