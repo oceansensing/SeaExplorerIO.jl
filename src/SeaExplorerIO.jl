@@ -14,7 +14,7 @@ timestamp/coordinate normalization, and robustness to corrupt or missing files.
 Sensor physics lives downstream (GliderADCP.jl for ADCP work, ATOMIXjulia.jl for
 microstructure), where thin wrappers adapt the [`GliderTable`](@ref) returned here.
 
-File conventions (verified on SeaExplorer missions sea064 M38/M48):
+File conventions (verified on SeaExplorer missions sea064 M37/M38/M48/M59):
 
   - semicolon-separated text with a header line and a trailing `;` per row,
     optionally gzipped
