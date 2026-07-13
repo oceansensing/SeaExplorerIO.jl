@@ -9,6 +9,7 @@ authors:
 version: 0.3.1
 date-released: "2026-07-13"
 license: MIT
+doi: 10.5281/zenodo.21345323
 repository-code: "https://github.com/oceansensing/SeaExplorerIO.jl"
 keywords:
   - oceanography

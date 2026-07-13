@@ -1,5 +1,7 @@
 # SeaExplorerIO.jl
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.21345323.svg)](https://doi.org/10.5281/zenodo.21345323)
+
 Pure-Julia readers for [Alseamar SeaExplorer](https://www.alseamar-alcen.com/products/underwater-glider/seaexplorer)
 glider log files: navigation (`*.gli.sub.N[.gz]`) and payload
 (`*.pld1.raw.N[.gz]`, `*.pld1.sub.N[.gz]`, `*.legato.raw.N[.gz]`, …) streams.
